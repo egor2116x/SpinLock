@@ -2,6 +2,9 @@
 #include <thread>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <list>
 
 class ISpinLock
 {
@@ -13,29 +16,22 @@ public:
 class SpinLockGuard
 {
 public:
-    SpinLockGuard(ISpinLock * lock, unsigned int count = 1) : m_Lock(lock), m_Count(count)
+    SpinLockGuard(ISpinLock * lock) : m_Lock(lock)
     {
         if (m_Lock)
         {
-            for (size_t i = 0; i < m_Count; i++)
-            {
-                m_Lock->Lock();
-            }
+            m_Lock->Lock();
         }
     }
     ~SpinLockGuard()
     {
         if (m_Lock)
         {
-            for (size_t i = 0; i < m_Count; i++)
-            {
-                m_Lock->Unlock();
-            }
+            m_Lock->Unlock();
         }
     }
 private:
     ISpinLock * m_Lock;
-    unsigned int m_Count;
 };
 
 class SpinLock : public ISpinLock
@@ -57,93 +53,116 @@ private:
 class RecusiveSpinLock : public ISpinLock
 {
 public:
-    RecusiveSpinLock() : m_RecursiveCounter(0), m_Owner(std::thread::id()) { m_Lock.clear(); }
+    RecusiveSpinLock() : m_RecursionCount(0)
+            , m_LockCount(0)
+            , m_Owner() {}
+    RecusiveSpinLock(RecusiveSpinLock const&) = delete;
+    RecusiveSpinLock& operator=(const RecusiveSpinLock &) = delete;
     void Lock() override
     {
-        for (volatile size_t i = 0; !TryLock(); ++i)
+        auto current_thread = std::this_thread::get_id();
+        
+        size_t thread_hash = m_Thread_hasher(current_thread);
+        size_t old_hash;
+
+        while (true)
         {
-            if (i % 100000 == 0)
+            size_t old_count = m_LockCount.exchange(1, std::memory_order::memory_order_acquire);
+            if (old_count == 0)
             {
-                std::this_thread::yield();
+                if(m_RecursionCount == 0);
+                {
+                    return;
+                }
+                m_Owner.store(thread_hash, std::memory_order::memory_order_relaxed);
+                break;
+            }
+
+            // Lock is already acquired, must be calling it recursively to be acquiring it
+            if (old_count == 1 && m_Owner.load(std::memory_order::memory_order_relaxed) == thread_hash)
+            {
+                if (m_RecursionCount > 0)
+                {
+                    return;
+                }
+                break;
             }
         }
+
+        m_RecursionCount++;
     }
     void Unlock() override
     {
-        if (m_Owner.load(std::memory_order_acquire) == std::this_thread::get_id())
-        {
-            return;
-        }
-        
-        if (m_RecursiveCounter <= 0)
+        auto current_thread = std::this_thread::get_id();
+        if (m_Owner == m_Thread_hasher(current_thread))
         {
             return;
         }
 
-        if (--m_RecursiveCounter == 0) 
+        --m_RecursionCount;
+        if (m_RecursionCount == 0)
         {
-            m_Owner.store(std::thread::id(), std::memory_order_release);
-            m_Lock.clear(std::memory_order_release);
+            std::hash<std::thread::id> thread_hasher;
+            m_Owner.store(thread_hasher(std::thread::id()), std::memory_order::memory_order_relaxed);
+            m_LockCount.exchange(0, std::memory_order::memory_order_release);
         }
     }
+
+
 private:
-    bool TryLock()
-    {
-        if (!m_Lock.test_and_set(std::memory_order_acquire)) 
-        {
-            m_Owner.store(std::this_thread::get_id(), std::memory_order_release);
-        }
-        else 
-        {
-            if (m_Owner.load(std::memory_order_acquire) != std::this_thread::get_id())
-            {
-                return false;
-            }
-        }
-        ++m_RecursiveCounter;
-        return true;
-    }
-private:
-    std::atomic_flag m_Lock;
-    int64_t m_RecursiveCounter;
-    std::atomic<std::thread::id> m_Owner;
+    size_t m_RecursionCount;
+    std::atomic<size_t> m_LockCount;
+    std::atomic<size_t> m_Owner;
+    std::hash<std::thread::id> m_Thread_hasher;
 };
 
-int g_ShareValue = 0;
-std::unique_ptr<ISpinLock> g_SpinLock(new SpinLock);
-std::unique_ptr<ISpinLock> g_RecursiveSpinLock(new RecusiveSpinLock);
-
-void UsingWithSpinLock()
+template<typename T>
+class ThreadSafeList
 {
-    SpinLockGuard lockGuard(g_SpinLock.get()); // lock
-    g_ShareValue++;
-    //unlock when return using SpinLockGuard destructor
-}
-
-void UsingWithRecursiveSpinLock()
-{
-    SpinLockGuard lockGuard(g_RecursiveSpinLock.get()); // lock
-    g_ShareValue++;
-    //unlock when return using SpinLockGuard destructor
-}
+public:
+    void PushBack(const T & value)
+    {
+        std::lock_guard<std::mutex> lock(m_Mtx);
+        m_Data.push_back(value);
+        m_CondVar.notify_one();
+    }
+    void TryPopBack()
+    {
+        std::lock_guard<std::mutex> lock(m_Mtx);
+        if (m_Data.empty())
+        {
+            return;
+        }
+        m_Data.pop_back();
+    }
+    void WaitAndPopBack()
+    {
+        std::unique_lock<std::mutex> lock(m_Mtx);
+        m_CondVar.wait(lock, [this] {return !m_Data.empty(); });
+        m_Data.pop_back();
+    }
+    bool Empty() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mtx);
+        return m_Data.empty();
+    }
+private:
+    mutable std::mutex m_Mtx;
+    std::list<T> m_Data;
+    std::condition_variable m_CondVar;
+};
 
 int main()
 {
-    /*std::thread t1(UsingWithSpinLock);
-    std::thread t2(UsingWithSpinLock);*/
+    ThreadSafeList<int> list;
 
-    std::thread t3(UsingWithRecursiveSpinLock);
-    std::thread t4(UsingWithRecursiveSpinLock);
+    list.PushBack(1);
+    list.PushBack(2);
+    list.PushBack(3);
+    list.PushBack(4);
 
-    /*t1.join(); 
-    t2.join();*/
-    std::cout << "shared_value = " << g_ShareValue << std::endl;
+    list.TryPopBack();
 
-    t3.join();
-    t4.join();
-
-    std::cout << "shared_value = " << g_ShareValue << std::endl;
-    
     std::cin.get();
     return 0;
 }
