@@ -135,16 +135,23 @@ public:
         }
         m_Data.pop_back();
     }
-    void WaitAndPopBack()
+    T WaitAndPopBack()
     {
         std::unique_lock<std::mutex> lock(m_Mtx);
         m_CondVar.wait(lock, [this] {return !m_Data.empty(); });
+        auto value = m_Data.back();
         m_Data.pop_back();
+        return std::move(value);
     }
     bool Empty() const
     {
         std::lock_guard<std::mutex> lock(m_Mtx);
         return m_Data.empty();
+    }
+    size_t Size() const
+    {
+        std::lock_guard<std::mutex> lock(m_Mtx);
+        return m_Data.size();
     }
 private:
     mutable std::mutex m_Mtx;
@@ -152,17 +159,73 @@ private:
     std::condition_variable m_CondVar;
 };
 
+
+class ThreadSafeListTest
+{
+public:
+    ThreadSafeListTest() : m_Stop(false) {}
+    void TestSafeList()
+    {
+        std::list<std::thread> l;
+        std::thread t(&ThreadSafeListTest::ThreadPushImpl, this);
+        l.push_back(std::move(t));
+        std::thread t1(&ThreadSafeListTest::ThreadPopImpl, this);
+        l.push_back(std::move(t1));
+        
+        for (auto & tr : l)
+        {
+            tr.join();
+        }
+    }
+    void PrintListInfo()
+    {
+        std::wcout << L"List size: " << m_SafeList.Size();
+    }
+private:
+    void ThreadPushImpl()
+    {
+        const size_t COUNT_ITERS = 1000;
+        std::hash<std::thread::id> hasher;
+        for (size_t i = 0; i < COUNT_ITERS; i++)
+        {
+            m_Mtx.lock();
+            std::wcout << L"Push Thread id: " << std::this_thread::get_id() << L" value: " << i << std::endl;
+            m_Mtx.unlock();
+            m_SafeList.PushBack(i);
+        }
+        m_Mtx.lock();
+        std::wcout << L"Thread id: " << std::this_thread::get_id() << L" WAS PUSHED: " << COUNT_ITERS << std::endl;
+        m_Mtx.unlock();
+        m_Stop = true;
+    }
+    void ThreadPopImpl()
+    {
+        size_t count = 0;
+        while (!m_Stop || !m_SafeList.Empty())
+        {
+            auto value = m_SafeList.WaitAndPopBack();
+            m_Mtx.lock();
+            std::wcout << L"Pop Thread id: " << std::this_thread::get_id() << L" value: " << value << std::endl;
+            m_Mtx.unlock();
+            ++count;
+        }
+        m_Mtx.lock();
+        std::wcout << L"Thread id: " << std::this_thread::get_id() << L" WAS POPPED: " << count << std::endl;
+        m_Mtx.unlock();
+    }
+private:
+    ThreadSafeList<size_t> m_SafeList;
+    std::mutex m_Mtx;
+    bool m_Stop;
+};
+
 int main()
 {
-    ThreadSafeList<int> list;
+    ThreadSafeListTest test;
+    test.TestSafeList();
+    test.PrintListInfo();
 
-    list.PushBack(1);
-    list.PushBack(2);
-    list.PushBack(3);
-    list.PushBack(4);
-
-    list.TryPopBack();
-
-    std::cin.get();
+    std::wcout << "Finish test...";
+    std::wcin.get();
     return 0;
 }
