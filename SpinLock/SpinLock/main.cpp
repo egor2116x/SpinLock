@@ -219,11 +219,69 @@ private:
     bool m_Stop;
 };
 
+class SpinLockTest
+{
+public:
+    void TestSpinLock()
+    {
+        std::list<std::thread> l;
+        std::thread t(&SpinLockTest::ThreadAddData, this);
+        l.push_back(std::move(t));
+        std::thread t1(&SpinLockTest::ThreadTriedReadPopData, this);
+        l.push_back(std::move(t1));
+
+        for (auto & tr : l)
+        {
+            tr.join();
+        }
+    }
+private:
+    void ThreadAddData()
+    {
+        const size_t COUNT_ITERS = 1000;
+        std::hash<std::thread::id> hasher;
+        for (size_t i = 0; i < COUNT_ITERS; i++)
+        {
+            m_Mtx.lock();
+            std::wcout << L"Push Thread id: " << std::this_thread::get_id() << L" value: " << i << std::endl;
+            m_Mtx.unlock();
+
+            m_Lock.Lock();
+            m_Data.push_back(i);
+            m_Lock.Unlock();
+        }
+    }
+
+    void ThreadTriedReadPopData()
+    {
+        size_t count = 0;
+        while (!m_Data.empty())
+        {
+            auto value = m_Data.back();
+            m_Data.pop_back();
+            m_Mtx.lock();
+            std::wcout << L"Pop Thread id: " << std::this_thread::get_id() << L" value: " << value << std::endl;
+            m_Mtx.unlock();
+            ++count;
+        }
+        m_Mtx.lock();
+        std::wcout << L"Thread id: " << std::this_thread::get_id() << L" WAS POPPED: " << count << std::endl;
+        m_Mtx.unlock();
+    }
+private:
+    std::list<size_t> m_Data;
+    std::mutex m_Mtx;
+    SpinLock m_Lock;
+};
+
 int main()
 {
-    ThreadSafeListTest test;
+    /*ThreadSafeListTest test;
     test.TestSafeList();
-    test.PrintListInfo();
+    test.PrintListInfo();*/
+
+    SpinLockTest test2;
+    test2.TestSpinLock();
 
     std::wcout << "Finish test...";
     std::wcin.get();
