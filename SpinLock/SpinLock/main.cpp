@@ -263,7 +263,6 @@ void ThreadSafeListTest::PrintListInfo()
 void ThreadSafeListTest::ThreadPushImpl()
 {
     const size_t COUNT_ITERS = 1000;
-    std::hash<std::thread::id> hasher;
     for (size_t i = 0; i < COUNT_ITERS; i++)
     {
         m_Mtx.lock();
@@ -309,7 +308,6 @@ void SpinLockTest::TestSpinLock()
 
 void SpinLockTest::ThreadAddData()
 {
-    std::hash<std::thread::id> hasher;
     for (size_t i = 0; i < COUNT_ITERS; i++)
     {
         m_Mtx.lock();
@@ -363,7 +361,6 @@ void RecursiveSpinLockTest::TestRecursiveSpinLock()
 void RecursiveSpinLockTest::ThreadAddData()
 {
     const size_t COUNT_ITERS = 1000;
-    std::hash<std::thread::id> hasher;
     for (size_t i = 0; i < COUNT_ITERS; i++)
     {
         m_Mtx.lock();
